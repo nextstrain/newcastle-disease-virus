@@ -1,0 +1,7 @@
+# This configuration file contains the custom configurations parameters
+# for the CI workflow to run with the example data.
+
+inputs:
+  - name: example_data
+    metadata: "example_data/metadata.tsv"
+    sequences: "example_data/sequences.fasta"
