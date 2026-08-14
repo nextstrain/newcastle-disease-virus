@@ -3,3 +3,133 @@
 #
 # Define optional config parameters with their default values here so that users
 # do not have to dig through the workflows to figure out the default values
+
+# Basename of the Auspice output: auspice/<auspice_prefix>_<class>.json
+auspice_prefix: newcastle
+
+# Metadata column that holds the sequence id. Written by `augur parse` (see the
+# `parse` section) and passed to every downstream augur call.
+id_column: accession
+
+# ---------------------------------------------------------------------------
+# Files
+#
+# Everything listed here is a workflow-wide default. Any of these keys can be
+# overridden for a single class under `classes: <class>:` below. The reference,
+# its GenBank record, the annotation and the two dataset documents (README and
+# CHANGELOG) are set per class there: the classes are aligned against different
+# references and are versioned independently of each other.
+# ---------------------------------------------------------------------------
+# Shared by both classes except for `attributes` and `shortcuts`, which each
+# class sets below and which are injected at assembly time.
+pathogen_json: defaults/pathogen.json
+auspice_config: defaults/auspice_config.json
+dropped_strains: defaults/dropped_strains.txt
+
+# CDSs to reconstruct ancestral sequences for. Must match the `Name=` attributes
+# of `genome_annotation`; the class-1 and class-2 annotations use the same CDS
+# names.
+genes:
+  - N
+  - P
+  - M
+  - F
+  - HN
+  - L
+
+# Not used by any rule at the moment; kept as the single place to record them.
+taxon_id: 3051375
+mediocre_strains: defaults/mediocre_strains.txt
+
+# ---------------------------------------------------------------------------
+# Classes
+#
+# Curated input sequences, keyed by the class they belong to. The genotype
+# nomenclatures of the two classes are separate, so each class gets its own
+# alignment, tree, Auspice JSON and Nextclade dataset, all under
+# `results/<class>/`, `auspice/` and `out-dataset/<class>/`.
+#
+# The class names must not contain an underscore: Auspice reads underscores in
+# an Auspice JSON filename as URL path separators.
+#
+# Besides the keys below, a class may override any of the file/gene defaults
+# above; the commented-out lines show how.
+# ---------------------------------------------------------------------------
+classes:
+  class-1:
+    # Input sequences with underscore-delimited headers, plain or compressed
+    # (see scripts/normalize_headers.py).
+    sequences: data/class_1.fasta.xz
+    # `clade_membership` written onto every node of this class' tree.
+    clade_membership: class 1
+    # Title shown by Auspice; overrides the title in `auspice_config`.
+    title: Newcastle disease virus class 1
+    # Class-1 reference: AB524405 (goose/Alaska/415/91).
+    reference: defaults/class1/reference.fasta
+    reference_gb: defaults/class1/reference.gb
+    genome_annotation: defaults/class1/genome_annotation.gff3
+    # Documents shipped with the Nextclade dataset.
+    readme: defaults/class1/README.md
+    changelog: defaults/class1/CHANGELOG.md
+    # Merged into `attributes` of the shared pathogen.json at assembly time.
+    pathogen_attributes:
+      name: Newcastle disease virus class 1
+      reference accession: AB524405
+      reference name: Goose/Alaska/415/91
+    # Aliases the dataset can be requested by: `nextclade run -d ndv-class-1`.
+    shortcuts:
+      - ndv-class-1
+  class-2:
+    sequences: data/class_2.fasta.xz
+    clade_membership: class 2
+    title: Newcastle disease virus class 2
+    # Class-2 reference: NC_075404 (chicken/N. Ireland/Ulster/67).
+    reference: defaults/class2/reference.fasta
+    reference_gb: defaults/class2/reference.gb
+    genome_annotation: defaults/class2/genome_annotation.gff3
+    readme: defaults/class2/README.md
+    changelog: defaults/class2/CHANGELOG.md
+    pathogen_attributes:
+      name: Newcastle disease virus class 2
+      reference accession: NC_075404
+      reference name: chicken/N. Ireland/Ulster/67
+    shortcuts:
+      - ndv-class-2
+
+# ---------------------------------------------------------------------------
+# Rule parameters
+# ---------------------------------------------------------------------------
+parse:
+  # Fields of the pipe-delimited headers produced by
+  # scripts/normalize_headers.py, in order.
+  fields: accession index genotype legacy_genotype strain_name country year class
+  separator: "|"
+
+filter:
+  min_length: 12000
+  min_coverage: 0.95
+  subsample_max_sequences: 2000
+  group_by: country year
+
+tree:
+  tree_builder_args: "-czb"
+
+refine:
+  # Clock rate is taken from
+  # https://github.com/nextstrain/yellow-fever/blob/main/phylogenetic/defaults/config.yaml
+  root: mid_point
+
+ancestral:
+  inference: joint
+
+genotypes:
+  # Read the per-tip genotype from this metadata column ...
+  genotype_column: genotype
+  # ... and write the per-node result to this attribute. Distinct names, since
+  # augur export puts metadata columns and node-data attributes in the same
+  # namespace.
+  genotype_label: genotype_label
+
+example_data:
+  # Sequences bundled with the Nextclade dataset as examples.
+  n_sequences: 20

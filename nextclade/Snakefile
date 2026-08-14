@@ -1,7 +1,16 @@
 """
 This is the main Nextclade Snakefile that orchestrates the workflow to produce
 a Nextclade dataset.
+
+Everything downstream of the input FASTA runs independently per class, under
+``results/<class>/``, and produces one Auspice JSON and one Nextclade dataset
+per class.
+
+All filenames and parameters live in ``defaults/config.yaml``.
 """
+import json
+import shlex
+
 # Use default configuration values. Extend with Snakemake's --configfile/--config options.
 configfile: os.path.join(workflow.basedir, "defaults/config.yaml")
 
@@ -9,52 +18,393 @@ configfile: os.path.join(workflow.basedir, "defaults/config.yaml")
 if os.path.exists("config.yaml"):
     configfile: "config.yaml"
 
-# This is the default rule that Snakemake will run when there are no specified targets.
-# The default output of the Nextclade workflow is usually the produced Nextclade dataset.
-# See Nextclade docs on expected naming conventions of dataset files
-# https://docs.nextstrain.org/projects/nextclade/page/user/datasets.html
+
+# The classes are the keys of `config["classes"]`. Everything downstream of the
+# input FASTA is expanded over them.
+#
+# The wildcard is called `cls` rather than `class` because `class` is a Python
+# keyword: it cannot be used in a `wildcard_constraints:` block or accessed as
+# `wildcards.class` in an input/params function. The paths on disk are
+# `results/class-1/...` and `results/class-2/...` either way.
+CLASSES = list(config["classes"])
+
+# Everything the workflow writes; removed by `snakemake clean`.
+OUTPUT_DIRS = ["results", "auspice", "out-dataset"]
+
+
+def class_config(cls, key):
+    """Config value for one class.
+
+    Looks in ``config["classes"][<cls>]`` first and falls back to the top level,
+    so that a class can override any workflow-wide default by repeating the key
+    under its own entry. The reference, its GenBank record and the annotation
+    have no workflow-wide default: each class is aligned against its own
+    reference and must set them.
+    """
+    scoped = config["classes"][cls]
+    if key in scoped:
+        return scoped[key]
+    if key in config:
+        return config[key]
+    raise WorkflowError(
+        f"config is missing '{key}': set it at the top level or under "
+        f"classes: {cls}: in defaults/config.yaml"
+    )
+
+
+def class_file(key):
+    """`class_config` as an input function, for use in `input:` blocks."""
+    return lambda w: class_config(w.cls, key)
+
+
+wildcard_constraints:
+    cls="|".join(CLASSES),
+
+
 rule all:
     input:
-        # Fill in paths to the final exported Nextclade dataset.
+        expand("auspice/{prefix}_{cls}.json", prefix=config["auspice_prefix"], cls=CLASSES),
+        expand("out-dataset/{cls}/tree.json", cls=CLASSES),
 
 
-# Shared Snakemake files with generic functions are shared across pathogens
-# Use `resolve_config_path` to resolve file paths for config files
-include: "../shared/vendored/snakemake/config.smk"
+rule clean:
+    message:
+        "Removing directories: {params.targets}"
+    params:
+        targets=" ".join(OUTPUT_DIRS),
+    shell:
+        "rm -rfv {params.targets}"
 
-# These rules are imported in the order that they are expected to run.
-# Each Snakefile will have documented inputs and outputs that should be kept as
-# consistent interfaces across pathogen repos. This allows us to define typical
-# steps that are required for a phylogenetic workflow, but still allow pathogen
-# specific customizations within each step.
-# Note that only PATHOGEN level customizations should be added to these
-# core steps, meaning they are custom rules necessary for all builds of the pathogen.
-# If there are build specific customizations, they should be added with the
-# custom_rules imported below to ensure that the core workflow is not complicated
-# by build specific rules.
-include: "rules/config.smk"
-include: "rules/preprocess.smk"
-include: "rules/prepare_sequences.smk"
-include: "rules/construct_phylogeny.smk"
-include: "rules/annotate_phylogeny.smk"
-include: "rules/export.smk"
 
-# Allow users to import custom rules provided via the config.
-# This allows users to run custom rules that can extend or override the workflow.
-# A concrete example of using custom rules is the extension of the workflow with
-# rules to do a test run of `nextclade run` with the produced Nextclade dataset.
-# For extensions, the user will have to specify the custom rule targets when
-# running the workflow.
-# For overrides, the custom Snakefile will have to use the `ruleorder` directive
-# to allow Snakemake to handle ambiguous rules
-# https://snakemake.readthedocs.io/en/stable/snakefiles/rules.html#handling-ambiguous-rules
-if "custom_rules" in config:
-    for rule_file in config["custom_rules"]:
+rule normalize_headers:
+    message:
+        """
+        Rewriting the underscore-delimited {wildcards.cls} headers into a
+        fixed-field, pipe-delimited form that augur parse can read
+        """
+    input:
+        sequences=class_file("sequences"),
+        script="scripts/normalize_headers.py",
+    output:
+        sequences="results/{cls}/renamed.fasta",
+    shell:
+        """
+        python3 {input.script} \
+            --sequences {input.sequences} \
+            --class-names {wildcards.cls} \
+            --output {output.sequences}
+        """
 
-        # Relative custom rule paths in the config are relative to the analysis
-        # directory (i.e. the current working directory, or workdir, usually
-        # given by --directory), but the "include" directive treats relative
-        # paths as relative to the workflow (e.g. workflow.current_basedir).
-        # Convert to an absolute path based on the analysis/current directory
-        # to avoid this mismatch of expectations.
-        include: os.path.join(os.getcwd(), rule_file)
+
+rule parse:
+    message:
+        "Splitting {wildcards.cls} into sequences.fasta and metadata.tsv"
+    input:
+        sequences=rules.normalize_headers.output.sequences,
+    output:
+        sequences="results/{cls}/sequences.fasta",
+        metadata="results/{cls}/metadata.tsv",
+    params:
+        fields=config["parse"]["fields"],
+        separator=config["parse"]["separator"],
+        id_field=config["id_column"],
+    shell:
+        """
+        augur parse \
+            --sequences {input.sequences} \
+            --fields {params.fields} \
+            --separator '{params.separator}' \
+            --output-id-field {params.id_field} \
+            --output-sequences {output.sequences} \
+            --output-metadata {output.metadata}
+        """
+
+
+rule align:
+    input:
+        sequences=rules.parse.output.sequences,
+        reference=class_file("reference"),
+        pathogen=class_file("pathogen_json"),
+        annotation=class_file("genome_annotation"),
+    output:
+        aligned="results/{cls}/alignment.fasta",
+    params:
+        # Lambda so that {cds} survives untouched for nextclade to fill in,
+        # while {cls} is resolved here.
+        translations=lambda w: f"results/{w.cls}/translations_{{cds}}.fasta",
+    shell:
+        """
+        nextclade run \
+        --retry-reverse-complement \
+        --input-ref={input.reference} \
+        --input-pathogen-json={input.pathogen} \
+        --input-annotation={input.annotation} \
+        --output-fasta={output.aligned} \
+        --output-translations={params.translations} \
+        {input.sequences}
+        """
+
+
+rule filter:
+    message:
+        """
+        Filter out dropped strains, sequences with coverage
+        under {params.min_coverage} and sequences that failed prealignment
+        """
+    input:
+        sequences=rules.align.output.aligned,
+        metadata=rules.parse.output.metadata,
+        exclude=class_file("dropped_strains"),
+    output:
+        filtered_sequences="results/{cls}/filtered.fasta",
+        filtered_metadata="results/{cls}/filtered_metadata.tsv",
+    params:
+        min_coverage=config["filter"]["min_coverage"],
+        min_length=config["filter"]["min_length"],
+        subsample_max_sequences=config["filter"]["subsample_max_sequences"],
+        group_by=config["filter"]["group_by"],
+        id_column=config["id_column"],
+    shell:
+        """
+        augur filter \
+            --sequences {input.sequences} \
+            --metadata {input.metadata} \
+            --exclude {input.exclude} \
+            --subsample-max-sequences {params.subsample_max_sequences} \
+            --group-by {params.group_by} \
+            --metadata-id-columns {params.id_column} \
+            --output-sequences {output.filtered_sequences} \
+            --output-metadata {output.filtered_metadata} \
+            --min-length {params.min_length}
+        """
+
+rule tree:
+    message:
+        "Building tree for {wildcards.cls}"
+    input:
+        alignment=rules.filter.output.filtered_sequences,
+    output:
+        tree="results/{cls}/tree_raw.nwk",
+    params:
+        tree_builder_args=config["tree"]["tree_builder_args"],
+    shell:
+        """
+        augur tree \
+            --alignment {input.alignment} \
+            --tree-builder-args="{params.tree_builder_args}"\
+            --output {output.tree}
+        """
+
+
+rule refine:
+    message:
+        """
+        Refining tree. Clock rate is taken from https://github.com/nextstrain/yellow-fever/blob/main/phylogenetic/defaults/config.yaml
+          - estimate timetree
+        """
+    input:
+        tree=rules.tree.output.tree,
+        alignment=rules.filter.output.filtered_sequences,
+        metadata=rules.filter.output.filtered_metadata
+    output:
+        tree="results/{cls}/tree_refined.nwk",
+        node_data="results/{cls}/branch_lengths.json",
+    params:
+        id_column=config["id_column"],
+        root=config["refine"]["root"],
+    shell:
+        """
+        augur refine \
+            --tree {input.tree} \
+            --alignment {input.alignment} \
+            --metadata {input.metadata} \
+            --metadata-id-columns {params.id_column} \
+            --output-tree {output.tree} \
+            --output-node-data {output.node_data} \
+            --root {params.root} \
+            --metadata-id-columns {params.id_column}
+        """
+
+
+rule ancestral:
+    message:
+        "Reconstructing ancestral sequences and mutations for {wildcards.cls}"
+    input:
+        tree=rules.refine.output.tree,
+        alignment=rules.filter.output.filtered_sequences,
+        reference=class_file("reference_gb"),
+        annotation=class_file("genome_annotation"),
+    output:
+        node_data="results/{cls}/muts.json",
+    params:
+        inference=config["ancestral"]["inference"],
+        translation_template=lambda w: f"results/{w.cls}/translations_%GENE.fasta",
+        genes=lambda w: " ".join(class_config(w.cls, "genes")),
+    shell:
+        """
+        augur ancestral \
+            --tree {input.tree} \
+            --root-sequence {input.reference} \
+            --alignment {input.alignment} \
+            --annotation {input.reference} \
+            --genes {params.genes} \
+            --inference {params.inference} \
+            --translations {params.translation_template} \
+            --output-node-data {output.node_data}
+        """
+
+
+rule clade_membership:
+    message:
+        "Labelling every node of the {wildcards.cls} tree with its class"
+    input:
+        tree=rules.refine.output.tree,
+        script="scripts/assign_clade_membership.py",
+    output:
+        node_data="results/{cls}/clade_membership.json",
+    params:
+        clade_name=lambda w: class_config(w.cls, "clade_membership"),
+    shell:
+        """
+        python3 {input.script} \
+            --tree {input.tree} \
+            --clade-name "{params.clade_name}" \
+            --output {output.node_data}
+        """
+
+
+rule genotypes:
+    message:
+        """
+        Labelling {wildcards.cls} nodes whose subtree holds exactly one
+        genotype; everything else becomes 'unclassified'
+        """
+    input:
+        tree=rules.refine.output.tree,
+        metadata=rules.filter.output.filtered_metadata,
+        script="scripts/assign_genotypes.py",
+    output:
+        node_data="results/{cls}/genotypes.json",
+    params:
+        id_column=config["id_column"],
+        genotype_column=config["genotypes"]["genotype_column"],
+        genotype_label=config["genotypes"]["genotype_label"],
+    shell:
+        """
+        python3 {input.script} \
+            --tree {input.tree} \
+            --metadata {input.metadata} \
+            --metadata-id-column {params.id_column} \
+            --genotype-column {params.genotype_column} \
+            --genotype-label {params.genotype_label} \
+            --output {output.node_data}
+        """
+
+
+rule export:
+    message:
+        "Exporting data files for auspice for {wildcards.cls}"
+    input:
+        tree=rules.refine.output.tree,
+        metadata=rules.filter.output.filtered_metadata,
+        clade_membership=rules.clade_membership.output.node_data,
+        genotypes=rules.genotypes.output.node_data,
+        branch_lengths=rules.refine.output.node_data,
+        # traits=rules.traits.output.node_data,
+        muts=rules.ancestral.output.node_data,
+        auspice_config=class_file("auspice_config"),
+    output:
+        auspice_json=f"auspice/{config['auspice_prefix']}_{{cls}}.json",
+    params:
+        id_column=config["id_column"],
+        # Overrides the title in the (shared) auspice config, so that the two
+        # builds are distinguishable in Auspice.
+        title=lambda w: class_config(w.cls, "title"),
+    shell:
+        """
+        augur export v2 \
+            --tree {input.tree} \
+            --metadata {input.metadata} \
+            --metadata-id-columns {params.id_column} \
+            --node-data {input.branch_lengths} {input.muts} \
+                        {input.clade_membership} {input.genotypes} \
+            --auspice-config {input.auspice_config} \
+            --title "{params.title}" \
+            --output {output.auspice_json} \
+            --metadata-id-columns {params.id_column}
+        """
+
+rule generate_example_data:
+    message:
+        "Generating example dataset for {wildcards.cls}"
+    input:
+        sequences=rules.parse.output.sequences,
+        metadata=rules.parse.output.metadata,
+        # clades=rules.clades.output.node_data,
+    output:
+        output_fasta="results/{cls}/example_sequences.fasta",
+    params:
+        n_sequences=config["example_data"]["n_sequences"],
+        id_column=config["id_column"],
+    shell:
+        """
+        augur filter \
+            --sequences {input.sequences} \
+            --metadata {input.metadata} \
+            --metadata-id-columns {params.id_column} \
+            --output-sequences {output.output_fasta} \
+            --subsample-max-sequences {params.n_sequences}
+        """
+
+rule pathogen_json:
+    message:
+        "Injecting the {wildcards.cls} attributes into the shared pathogen.json"
+    input:
+        pathogen=class_file("pathogen_json"),
+        script="scripts/set_pathogen_attributes.py",
+    output:
+        pathogen="results/{cls}/pathogen.json",
+    params:
+        # Pre-quoted: the attribute keys and values contain spaces, and the JSON
+        # object contains double quotes.
+        attributes=lambda w: shlex.quote(json.dumps(class_config(w.cls, "pathogen_attributes"))),
+        shortcuts=lambda w: " ".join(shlex.quote(s) for s in class_config(w.cls, "shortcuts")),
+    shell:
+        """
+        python3 {input.script} \
+            --pathogen-json {input.pathogen} \
+            --attributes {params.attributes} \
+            --shortcuts {params.shortcuts} \
+            --output {output.pathogen}
+        """
+
+
+rule assemble_dataset:
+    message:
+        "Assembling NextClade dataset for {wildcards.cls}"
+    input:
+        tree = rules.export.output.auspice_json,
+        reference = class_file("reference"),
+        annotation = class_file("genome_annotation"),
+        sequences = rules.generate_example_data.output.output_fasta,
+        pathogen = rules.pathogen_json.output.pathogen,
+        readme = class_file("readme"),
+        changelog = class_file("changelog"),
+    output:
+        tree = "out-dataset/{cls}/tree.json",
+        reference = "out-dataset/{cls}/reference.fasta",
+        annotation = "out-dataset/{cls}/genome_annotation.gff3",
+        sequences = "out-dataset/{cls}/sequences.fasta",
+        pathogen = "out-dataset/{cls}/pathogen.json",
+        readme = "out-dataset/{cls}/README.md",
+        changelog = "out-dataset/{cls}/CHANGELOG.md",
+    shell:
+        """
+        cp {input.tree} {output.tree}
+        cp {input.reference} {output.reference}
+        cp {input.annotation} {output.annotation}
+        cp {input.sequences} {output.sequences}
+        cp {input.pathogen} {output.pathogen}
+        cp {input.readme} {output.readme}
+        cp {input.changelog} {output.changelog}
+        """

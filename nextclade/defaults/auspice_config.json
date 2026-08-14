@@ -1,0 +1,63 @@
+{
+  "title": "Newcastle disease virus",
+  "maintainers": [
+    {"name": "Richard Neher", "url": "https://neherlab.org"},
+    {"name": "Nextstrain team", "url": "https://nextstrain.org"}
+  ],
+  "data_provenance": [
+    {
+      "name": "GenBank",
+      "url": "https://www.ncbi.nlm.nih.gov/genbank/"
+    },
+    {
+      "name": "NDV_Sequence_Datasets (GitHub)",
+      "url": "https://github.com/NDVconsortium/NDV_Sequence_Datasets/"
+    }
+  ],
+  "colorings": [
+    {
+      "key": "gt",
+      "title": "genotype",
+      "type": "categorical"
+    },
+    {
+      "key": "year",
+      "title": "Date",
+      "type": "continuous"
+    },
+    {
+      "key": "country",
+      "title": "country",
+      "type": "categorical"
+    },
+    {
+      "key": "genotype_label",
+      "title": "NDV genotype",
+      "type": "categorical"
+    }
+  ],
+  "geo_resolutions": [
+    "country",
+    "region"
+  ],
+  "display_defaults": {
+    "map_triplicate": true,
+    "transmission_lines": false
+  },
+  "filters": [
+    "country",
+    "region",
+    "author"
+  ],
+  "extensions": {
+    "nextclade": {
+      "clade_node_attrs":[
+        {
+          "name": "genotype_label",
+          "displayName": "Genotype",
+          "description": "Genotype nomenclature using proposal by Dimitrov et al, 2019 based on the 2022 release."
+        }
+      ]
+    }
+  }
+}
