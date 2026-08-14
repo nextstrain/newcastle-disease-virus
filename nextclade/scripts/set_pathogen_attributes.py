@@ -1,14 +1,16 @@
 """
-Write the class-specific ``attributes`` and ``shortcuts`` into a copy of the
-shared ``pathogen.json``.
+Write the class-specific ``attributes``, ``shortcuts`` and ignored stop codons
+into a copy of the shared ``pathogen.json``.
 
-Everything else in ``pathogen.json`` (alignment parameters, QC, gene order, ...)
-is common to both classes, so the file is kept shared and only the few fields
-that name the dataset are injected here, at assembly time.
+Everything else in ``pathogen.json`` (alignment parameters, the rest of the QC
+configuration, gene order, ...) is common to both classes, so the file is kept
+shared and only the fields that are specific to one class are injected here, at
+assembly time.
 
 ``attributes`` is merged key by key, so the shared file can hold defaults that a
-class does not override; ``shortcuts`` is replaced wholesale, since a shortcut
-resolves to exactly one dataset.
+class does not override; ``shortcuts`` and ``qc.stopCodons.ignoredStopCodons``
+are replaced wholesale, since a shortcut resolves to exactly one dataset and the
+stop codons are read off that class' own tree (see scripts/find_stop_codons.py).
 """
 
 import argparse
@@ -29,6 +31,11 @@ def main():
         default=None,
         help='Dataset shortcuts, replacing "shortcuts" (omit to leave as is)',
     )
+    parser.add_argument(
+        "--ignored-stop-codons",
+        help='JSON list written to "qc.stopCodons.ignoredStopCodons" '
+        "(omit to leave as is)",
+    )
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
@@ -43,6 +50,12 @@ def main():
     if args.shortcuts is not None:
         pathogen["shortcuts"] = list(args.shortcuts)
 
+    if args.ignored_stop_codons:
+        with open(args.ignored_stop_codons) as handle:
+            ignored = json.load(handle)
+        stop_codons = pathogen.setdefault("qc", {}).setdefault("stopCodons", {})
+        stop_codons["ignoredStopCodons"] = ignored
+
     with open(args.output, "w") as out:
         json.dump(pathogen, out, indent=2)
         out.write("\n")
@@ -50,6 +63,8 @@ def main():
     print(f"{args.pathogen_json} -> {args.output}")
     print(f"  attributes: {json.dumps(pathogen['attributes'])}")
     print(f"  shortcuts: {json.dumps(pathogen.get('shortcuts', []))}")
+    ignored = pathogen.get("qc", {}).get("stopCodons", {}).get("ignoredStopCodons", [])
+    print(f"  ignored stop codons: {len(ignored)}")
 
 
 if __name__ == "__main__":

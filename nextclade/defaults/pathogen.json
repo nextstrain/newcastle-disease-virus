@@ -57,7 +57,7 @@
     "frameShifts": {
       "enabled": true,
       "scoreWeight": 50,
-      "ignoreFrameShifts": [
+      "ignoredFrameShifts": [
       ]
     },
     "stopCodons": {
@@ -70,5 +70,5 @@
   "attributes": {
     "name": "Newcastle disease virus"
   },
-  "geneOrderPreference":["N", "P", "M", "F", "HN", "L"]
+  "cdsOrderPreference":["N", "P", "M", "F", "HN", "L"]
 }

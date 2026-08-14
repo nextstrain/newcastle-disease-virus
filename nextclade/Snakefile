@@ -356,11 +356,31 @@ rule generate_example_data:
             --subsample-max-sequences {params.n_sequences}
         """
 
+rule stop_codons:
+    message:
+        """
+        Collecting the premature stop codons of the {wildcards.cls} tree, so
+        that Nextclade does not flag them as QC problems
+        """
+    input:
+        muts=rules.ancestral.output.node_data,
+        script="scripts/find_stop_codons.py",
+    output:
+        stop_codons="results/{cls}/ignored_stop_codons.json",
+    shell:
+        """
+        python3 {input.script} \
+            --muts {input.muts} \
+            --output {output.stop_codons}
+        """
+
+
 rule pathogen_json:
     message:
         "Injecting the {wildcards.cls} attributes into the shared pathogen.json"
     input:
         pathogen=class_file("pathogen_json"),
+        stop_codons=rules.stop_codons.output.stop_codons,
         script="scripts/set_pathogen_attributes.py",
     output:
         pathogen="results/{cls}/pathogen.json",
@@ -375,6 +395,7 @@ rule pathogen_json:
             --pathogen-json {input.pathogen} \
             --attributes {params.attributes} \
             --shortcuts {params.shortcuts} \
+            --ignored-stop-codons {input.stop_codons} \
             --output {output.pathogen}
         """
 
