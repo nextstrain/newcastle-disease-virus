@@ -46,20 +46,6 @@ def read_genotypes(path, id_column, genotype_column):
         return {row[id_column]: normalize(row[genotype_column]) for row in reader}
 
 
-def postorder(tree):
-    """Yield every clade after all of its children.
-
-    Iterative so that ladder-shaped trees cannot blow the recursion limit.
-    """
-    stack = [(tree.root, False)]
-    while stack:
-        clade, expanded = stack.pop()
-        if expanded:
-            yield clade
-        else:
-            stack.append((clade, True))
-            stack.extend((child, False) for child in clade.clades)
-
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -90,7 +76,7 @@ def main():
     unnamed = 0
     missing = []
 
-    for clade in postorder(tree):
+    for clade in tree.find_clades(order="postorder"):
         if clade.clades:
             labels = set()
             for child in clade.clades:
