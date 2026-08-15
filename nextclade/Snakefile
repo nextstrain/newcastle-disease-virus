@@ -4,7 +4,10 @@ a Nextclade dataset.
 
 Everything downstream of the input FASTA runs independently per class, under
 ``results/<class>/``, and produces one Auspice JSON and one Nextclade dataset
-per class.
+per class. The only thing a build takes from the other class is that class'
+reference sequence, which is grafted onto the tree as an outgroup (see
+``graft_outgroup``); that is a file under ``defaults/``, not a build product,
+so the two builds still do not depend on each other.
 
 All filenames and parameters live in ``defaults/config.yaml``.
 """
@@ -55,6 +58,36 @@ def class_config(cls, key):
 def class_file(key):
     """`class_config` as an input function, for use in `input:` blocks."""
     return lambda w: class_config(w.cls, key)
+
+
+def outgroup_config(cls, key):
+    """Config value for the class that `cls` carries as its outgroup.
+
+    Each class' tree is grafted onto a root it shares with the reference of the
+    other class (`outgroup:` in the config), so that sequences of that class
+    are attracted to that one tip instead of being placed somewhere inside the
+    ingroup. Everything the outgroup needs -- its reference and the class it is
+    labelled with -- is read from that class' own config entry.
+    """
+    return class_config(class_config(cls, "outgroup"), key)
+
+
+def outgroup_file(key):
+    """`outgroup_config` as an input function, for use in `input:` blocks."""
+    return lambda w: outgroup_config(w.cls, key)
+
+
+def outgroup_name(cls):
+    """Name of the outgroup tip in the alignment and in the tree.
+
+    This is the id of the (single) record of the other class' reference FASTA:
+    the name nextclade writes into the alignment is the header up to the first
+    whitespace, and the tree has to agree with it.
+    """
+    from Bio import SeqIO
+    reference = SeqIO.read(outgroup_config(cls, "reference"), "fasta")
+    return reference.id
+    raise WorkflowError(f"{reference} holds no FASTA record to use as outgroup")
 
 
 wildcard_constraints:
@@ -226,19 +259,93 @@ rule refine:
         """
 
 
+rule align_with_outgroup:
+    message:
+        """
+        Aligning the outgroup -- the reference of the class that {wildcards.cls}
+        carries as its outgroup -- against the {wildcards.cls} reference, and
+        appending it to the {wildcards.cls} alignment and translations
+        """
+    input:
+        alignment=rules.filter.output.filtered_sequences,
+        # Not read as such: what is read are the per-CDS translations that
+        # `align` writes next to it, which are not declared as outputs.
+        aligned=rules.align.output.aligned,
+        outgroup=outgroup_file("reference"),
+        reference=class_file("reference"),
+        pathogen=class_file("pathogen_json"),
+        annotation=class_file("genome_annotation"),
+    output:
+        alignment="results/{cls}/alignment_with_outgroup.fasta",
+    params:
+        # The outgroup is aligned on its own and appended, rather than the
+        # whole set being re-aligned: everything else has been through
+        # nextclade already, in `align`.
+        outgroup_alignment=lambda w: f"results/{w.cls}/outgroup_alignment.fasta",
+        outgroup_translations=lambda w: f"results/{w.cls}/outgroup_translations_{{cds}}.fasta",
+        genes=lambda w: " ".join(class_config(w.cls, "genes")),
+        results=lambda w: f"results/{w.cls}",
+    shell:
+        """
+        nextclade run \
+            --input-ref={input.reference} \
+            --input-pathogen-json={input.pathogen} \
+            --input-annotation={input.annotation} \
+            --output-fasta={params.outgroup_alignment} \
+            --output-translations={params.outgroup_translations} \
+            {input.outgroup}
+
+        cat {input.alignment} {params.outgroup_alignment} > {output.alignment}
+
+        for gene in {params.genes}; do
+            cat {params.results}/translations_$gene.fasta \
+                {params.results}/outgroup_translations_$gene.fasta \
+                > {params.results}/translations_with_outgroup_$gene.fasta
+        done
+        """
+
+
+rule graft_outgroup:
+    message:
+        """
+        Grafting the outgroup onto the refined {wildcards.cls} tree, under a
+        new root shared by the two classes
+        """
+    input:
+        tree=rules.refine.output.tree,
+        branch_lengths=rules.refine.output.node_data,
+        script="scripts/graft_outgroup.py",
+    output:
+        tree="results/{cls}/tree_with_outgroup.nwk",
+        node_data="results/{cls}/branch_lengths_with_outgroup.json",
+    params:
+        outgroup=lambda w: outgroup_name(w.cls),
+        root_name=config["graft_outgroup"]["root_name"],
+    shell:
+        """
+        python3 {input.script} \
+            --tree {input.tree} \
+            --branch-lengths {input.branch_lengths} \
+            --outgroup-name {params.outgroup} \
+            --root-name {params.root_name} \
+            --output-tree {output.tree} \
+            --output-branch-lengths {output.node_data}
+        """
+
+
 rule ancestral:
     message:
         "Reconstructing ancestral sequences and mutations for {wildcards.cls}"
     input:
-        tree=rules.refine.output.tree,
-        alignment=rules.filter.output.filtered_sequences,
+        tree=rules.graft_outgroup.output.tree,
+        alignment=rules.align_with_outgroup.output.alignment,
         reference=class_file("reference_gb"),
         annotation=class_file("genome_annotation"),
     output:
         node_data="results/{cls}/muts.json",
     params:
         inference=config["ancestral"]["inference"],
-        translation_template=lambda w: f"results/{w.cls}/translations_%GENE.fasta",
+        translation_template=lambda w: f"results/{w.cls}/translations_with_outgroup_%GENE.fasta",
         genes=lambda w: " ".join(class_config(w.cls, "genes")),
     shell:
         """
@@ -258,17 +365,21 @@ rule clade_membership:
     message:
         "Labelling every node of the {wildcards.cls} tree with its class"
     input:
-        tree=rules.refine.output.tree,
+        tree=rules.graft_outgroup.output.tree,
         script="scripts/assign_clade_membership.py",
     output:
         node_data="results/{cls}/clade_membership.json",
     params:
         clade_name=lambda w: class_config(w.cls, "clade_membership"),
+        outgroup=lambda w: outgroup_name(w.cls),
+        outgroup_clade=lambda w: outgroup_config(w.cls, "clade_membership"),
     shell:
         """
         python3 {input.script} \
             --tree {input.tree} \
             --clade-name "{params.clade_name}" \
+            --outgroup {params.outgroup} \
+            --outgroup-clade "{params.outgroup_clade}" \
             --output {output.node_data}
         """
 
@@ -280,7 +391,7 @@ rule genotypes:
         genotype; everything else becomes 'unclassified'
         """
     input:
-        tree=rules.refine.output.tree,
+        tree=rules.graft_outgroup.output.tree,
         metadata=rules.filter.output.filtered_metadata,
         script="scripts/assign_genotypes.py",
     output:
@@ -289,6 +400,7 @@ rule genotypes:
         id_column=config["id_column"],
         genotype_column=config["genotypes"]["genotype_column"],
         genotype_label=config["genotypes"]["genotype_label"],
+        outgroup=lambda w: outgroup_name(w.cls),
     shell:
         """
         python3 {input.script} \
@@ -297,6 +409,7 @@ rule genotypes:
             --metadata-id-column {params.id_column} \
             --genotype-column {params.genotype_column} \
             --genotype-label {params.genotype_label} \
+            --outgroup {params.outgroup} \
             --output {output.node_data}
         """
 
@@ -305,11 +418,11 @@ rule export:
     message:
         "Exporting data files for auspice for {wildcards.cls}"
     input:
-        tree=rules.refine.output.tree,
+        tree=rules.graft_outgroup.output.tree,
         metadata=rules.filter.output.filtered_metadata,
         clade_membership=rules.clade_membership.output.node_data,
         genotypes=rules.genotypes.output.node_data,
-        branch_lengths=rules.refine.output.node_data,
+        branch_lengths=rules.graft_outgroup.output.node_data,
         # traits=rules.traits.output.node_data,
         muts=rules.ancestral.output.node_data,
         auspice_config=class_file("auspice_config"),
@@ -338,14 +451,15 @@ rule generate_example_data:
     message:
         "Generating example dataset for {wildcards.cls}"
     input:
-        sequences=rules.parse.output.sequences,
-        metadata=rules.parse.output.metadata,
+        sequences='../ingest/results/sequences.fasta',
+        metadata='../ingest/results/metadata.tsv',
         # clades=rules.clades.output.node_data,
     output:
         output_fasta="results/{cls}/example_sequences.fasta",
     params:
         n_sequences=config["example_data"]["n_sequences"],
         id_column=config["id_column"],
+        min_year=2023
     shell:
         """
         augur filter \
@@ -353,7 +467,8 @@ rule generate_example_data:
             --metadata {input.metadata} \
             --metadata-id-columns {params.id_column} \
             --output-sequences {output.output_fasta} \
-            --subsample-max-sequences {params.n_sequences}
+            --subsample-max-sequences {params.n_sequences} \
+            --min-date {params.min_year}
         """
 
 rule stop_codons:

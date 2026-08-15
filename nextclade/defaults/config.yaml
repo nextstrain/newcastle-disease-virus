@@ -62,6 +62,10 @@ classes:
     sequences: data/class_1.fasta.xz
     # `clade_membership` written onto every node of this class' tree.
     clade_membership: class 1
+    # The class whose reference is grafted onto this class' tree as an
+    # outgroup, to attract the sequences of that class (see `graft_outgroup`).
+    # Its reference, `clade_membership` and so on are read from its entry here.
+    outgroup: class-2
     # Title shown by Auspice; overrides the title in `auspice_config`.
     title: Newcastle disease virus class 1
     # Class-1 reference: AB524405 (goose/Alaska/415/91).
@@ -82,6 +86,7 @@ classes:
   class-2:
     sequences: data/class_2.fasta.xz
     clade_membership: class 2
+    outgroup: class-1
     title: Newcastle disease virus class 2
     # Class-2 reference: NC_075404 (chicken/N. Ireland/Ulster/67).
     reference: defaults/class2/reference.fasta
@@ -118,6 +123,12 @@ refine:
   # Clock rate is taken from
   # https://github.com/nextstrain/yellow-fever/blob/main/phylogenetic/defaults/config.yaml
   root: mid_point
+
+graft_outgroup:
+  # Name of the root added above the refined tree and the outgroup. The two
+  # datasets use the same name, since the node means the same thing in both:
+  # the common ancestor of the two classes.
+  root_name: root
 
 ancestral:
   inference: joint

@@ -16,6 +16,14 @@ The tip genotypes are read from the ``--genotype-column`` metadata column and
 the inferred label is written to the ``--genotype-label`` node attribute. These
 are deliberately separate: the former is per-tip input, the latter is a
 per-node result defined over whole subtrees.
+
+The outgroup grafted on by ``scripts/graft_outgroup.py`` is the reference of
+the other class, whose genotype nomenclature is a different one; ``--outgroup``
+therefore leaves it, and the root joining it to the ingroup, without a label
+altogether. That is not the same as ``unclassified``, which means "belongs to
+this class, but to no single genotype within it": these two nodes get no
+attribute at all, so that Nextclade reports nothing rather than a genotype from
+a nomenclature that does not apply.
 """
 
 import argparse
@@ -24,7 +32,7 @@ import json
 
 from Bio import Phylo
 
-UNCLASSIFIED = "unclassified"
+UNCLASSIFIED = "unassigned"
 UNCLASSIFIED_PREFIX = "UNCL"
 
 
@@ -65,6 +73,11 @@ def main():
         "columns and node-data attributes into one namespace, so reusing "
         "'genotype' would collide with the per-tip metadata column.",
     )
+    parser.add_argument(
+        "--outgroup",
+        help="Name of the grafted outgroup tip. It and the root above it are "
+        "left unlabelled; see the module docstring.",
+    )
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
@@ -81,6 +94,10 @@ def main():
             labels = set()
             for child in clade.clades:
                 labels |= below.pop(id(child))
+        elif clade.name == args.outgroup:
+            # Contributes no label, rather than `unclassified`: the genotypes
+            # of the other class are not part of this nomenclature.
+            labels = set()
         else:
             if clade.name not in genotypes:
                 missing.append(clade.name)
@@ -90,8 +107,15 @@ def main():
         if not clade.name:
             unnamed += 1
             continue
+        if args.outgroup and (clade.name == args.outgroup or clade is tree.root):
+            continue
         label = next(iter(labels)) if len(labels) == 1 else UNCLASSIFIED
         nodes[clade.name] = {args.genotype_label: label}
+
+    if args.outgroup and not any(
+        clade.name == args.outgroup for clade in tree.find_clades()
+    ):
+        raise SystemExit(f"'{args.outgroup}' is not a node of {args.tree}")
 
     with open(args.output, "w") as out:
         json.dump({"nodes": nodes}, out, indent=2)
@@ -106,6 +130,11 @@ def main():
         f"  labelled: {len(assigned)}  ({len(set(assigned.values()))} distinct genotypes)\n"
         f"  {UNCLASSIFIED}: {len(nodes) - len(assigned)}"
     )
+    if args.outgroup:
+        print(
+            f"  outgroup '{args.outgroup}' and root '{tree.root.name}': "
+            f"left without {args.genotype_label}"
+        )
     if missing:
         print(f"  WARNING: {len(missing)} tip(s) absent from metadata: {missing[:5]}")
     if unnamed:
